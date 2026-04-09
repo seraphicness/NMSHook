@@ -1,0 +1,201 @@
+# NMSHook
+
+**Runtime NMS hook library for Paper plugins.**  
+Intercept, modify, and replace NMS method behavior using annotations or a fluent lambda API — no server JAR modifications required.
+
+Built on [ByteBuddy](https://bytebuddy.net/) + [paperweight-userdev](https://github.com/PaperMC/paperweight).
+
+## Features
+
+- **Type-safe NMS access** — Reference NMS classes as `Class<?>` directly via paperweight. No string-based reflection.
+- **Non-invasive** — Plugin-only installation. No server core patches. Hooks are cleanly removed on disable.
+- **Annotation API** — `@Inject`, `@Overwrite`, `@Shadow`, `@ModifyArg` for declarative hook definitions.
+- **Lambda API** — Fluent builder for quick, inline hooks without annotation classes.
+- **Runtime bytecode transformation** — ByteBuddy Advice inlined into NMS methods at runtime via `java.lang.instrument`.
+- **Owner-based lifecycle** — Register and unregister hooks per plugin. No cross-plugin interference.
+- **Debug mode** — Dump transformed bytecode and trace slow hook execution.
+- **Folia compatible** — ThreadLocal-isolated handler instances for multi-threaded tick safety.
+
+## Requirements
+
+- Java 21+
+- Paper 1.21+
+- ByteBuddy 1.14+ (bundled)
+
+## Quick Start
+
+### Lambda API
+
+```java
+NMSHookLib.hook()
+    .owner(this)
+    .target(ServerPlayer.class)
+    .method("hurtServer")
+    .at(HookPoint.BEFORE)
+    .cancellable(true)
+    .listener(ctx -> {
+        float damage = ctx.getArg(2);
+        if (damage > 20f) ctx.cancel();
+    })
+    .register();
+```
+
+### Annotation API
+
+```java
+@NMSMixin(target = ServerPlayer.class)
+public abstract class ServerPlayerHook {
+
+    @Shadow
+    private float lastSentHealth;
+
+    @Inject(method = "hurtServer", at = @At("HEAD"), cancellable = true)
+    private void onHurt(ServerLevel level, DamageSource source, float amount, CallbackInfo ci) {
+        if (lastSentHealth <= 5f) ci.cancel();
+    }
+
+    @Inject(method = "die", at = @At("TAIL"))
+    private void onDie(DamageSource source, CallbackInfo ci) {
+        // runs after the original method
+    }
+
+    @ModifyArg(method = "hurtServer", index = 2)
+    private float onDamage(float damage) {
+        return damage * 0.5f;
+    }
+
+    @Overwrite
+    public void attack(Entity target) {
+        // completely replaces the original method
+    }
+}
+```
+
+Register in your plugin:
+
+```java
+@Override
+public void onEnable() {
+    NMSHookLib.registerMixin(ServerPlayerHook.class, this);
+}
+
+@Override
+public void onDisable() {
+    NMSHookLib.unregisterAll(this);
+}
+```
+
+## Annotations
+
+| Annotation | Description |
+|---|---|
+| `@NMSMixin(target)` | Declares a hook class targeting an NMS class |
+| `@Inject(method, at)` | Injects code at HEAD, TAIL, or RETURN of a method |
+| `@Overwrite` | Completely replaces the target method |
+| `@ModifyArg(method, index)` | Modifies a specific method argument before execution |
+| `@Shadow` | Binds a field to the target class instance (read + write) |
+
+## Lambda Hook Points
+
+| HookPoint | Description |
+|---|---|
+| `BEFORE` | Runs before the method. Can cancel execution. |
+| `AFTER` | Runs after the method. Can modify the return value. |
+| `REPLACE` | Replaces the method entirely. Original code does not run. |
+
+## Architecture
+
+```
+Your Plugin
+  │
+  ├── @NMSMixin / NMSHookLib.hook()    ← user-facing API
+  │
+NMSHook (nmshook-plugin)
+  │
+  ├── nmshook-api        Shared kernel: annotations, callbacks, interfaces
+  ├── nmshook-hook       Hook domain: registry, executor, priority
+  ├── nmshook-mixin      Mixin domain: parsing, handler adapter, shadow binding
+  ├── nmshook-transform  Transform domain: ByteBuddy Advice, bootstrap injection
+  ├── nmshook-agent      Agent domain: JVM Instrumentation lifecycle
+  └── nmshook-resolver   Resolver domain: Mojang mapping resolution
+```
+
+**Runtime flow:**
+
+```
+NMS method called
+  → inlined NMSAdvice.enter()
+    → HookDispatcher.dispatchBefore()          [bootstrap CL]
+      → HookExecutor.handleBeforePhase()       [plugin CL]
+        → REPLACE hooks → skip original
+        → BEFORE hooks  → cancel if requested
+  → original method (or skipped)
+  → inlined NMSAdvice.exit()
+    → HookDispatcher.dispatchAfter()
+      → HookExecutor.handleAfterPhase()
+        → AFTER hooks → modify return value
+```
+
+## Configuration
+
+### Debug Mode
+
+Add to your server JVM args:
+
+```
+-Dnmshook.debug=true
+```
+
+Transformed bytecode will be dumped to `plugins/NMSHook/debug/`.  
+Hooks exceeding 1ms execution time will be logged as warnings.
+
+### JVM Flags (recommended)
+
+```
+-XX:+EnableDynamicAgentLoading   # suppress agent loading warning
+-Xshare:off                      # suppress CDS warning
+```
+
+### javaagent Mode (optional)
+
+For earlier Instrumentation acquisition, add to JVM args:
+
+```
+-javaagent:plugins/NMSHook-0.1.0-SNAPSHOT.jar
+```
+
+## Building
+
+```bash
+./gradlew build
+```
+
+Output: `nmshook-plugin/build/libs/NMSHook-<version>.jar`
+
+## Dependency (for plugin developers)
+
+Add `nmshook-api` as a compile-only dependency:
+
+```kotlin
+repositories {
+    // your NMSHook repository
+}
+
+dependencies {
+    compileOnly("dev.velvet.nmshook:nmshook-api:0.1.0-SNAPSHOT")
+}
+```
+
+And declare the dependency in `paper-plugin.yml`:
+
+```yaml
+dependencies:
+  server:
+    NMSHook:
+      load: BEFORE
+      required: true
+```
+
+## License
+
+[MIT](LICENSE)
