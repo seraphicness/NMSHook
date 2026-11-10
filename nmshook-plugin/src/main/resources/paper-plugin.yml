@@ -4,6 +4,7 @@ main: dev.seraphicness.nmshook.plugin.NMSHookPlugin
 description: Mixin-style runtime hook library based on ByteBuddy + Paper NMS
 api-version: '26.1'
 author: seraphicness
+website: https://github.com/seraphicness/NMSHook
 permissions:
   nmshook.admin:
     description: Allows using /nmshook

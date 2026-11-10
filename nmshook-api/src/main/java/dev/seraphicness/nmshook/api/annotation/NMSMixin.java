@@ -13,7 +13,7 @@ import java.lang.annotation.Target;
 @Retention(RetentionPolicy.RUNTIME)
 public @interface NMSMixin {
 
-    /** Target NMS class to hook. Can be referenced directly as Class<?> thanks to paperweight. */
+    /** Target NMS class to hook, referenced directly as a {@code Class<?>}. */
     Class<?> target();
 
     /** Priority. Lower values are applied first. Default is 1000. */

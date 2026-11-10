@@ -1,9 +1,22 @@
 # NMSHook
 
-**Runtime NMS hook library for Paper plugins.**  
-Intercept, modify, and replace NMS method behavior using annotations or a fluent lambda API — no server JAR modifications required.
+[![JitPack](https://jitpack.io/v/seraphicness/NMSHook.svg)](https://jitpack.io/#seraphicness/NMSHook)
+![Paper](https://img.shields.io/badge/Paper-26.1%20–%2026.3-blue)
+![Java](https://img.shields.io/badge/Java-25-orange)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-Built on [ByteBuddy](https://bytebuddy.net/) + [paperweight-userdev](https://github.com/PaperMC/paperweight).
+**Mixin-style runtime hooks into Paper server internals — no server patches, no forks.**
+
+NMSHook lets Paper plugins change how the Minecraft server itself behaves. Hooks are written with
+Mixin-like annotations or a lambda builder and applied at runtime with ByteBuddy, from a normal plugin.
+
+📖 **[Documentation](docs/README.md)** ·
+[Getting started](docs/getting-started.md) ·
+[Lambda API](docs/lambda-api.md) ·
+[Mixin API](docs/mixin-api.md) ·
+[Finding targets](docs/targeting.md) ·
+[Server setup](docs/server-setup.md) ·
+[Troubleshooting](docs/troubleshooting.md)
 
 ## Features
 
@@ -21,7 +34,7 @@ Built on [ByteBuddy](https://bytebuddy.net/) + [paperweight-userdev](https://git
 - **Low overhead** — Inactive methods cost one flag check; handlers are reached through constant call sites.
 - **Diagnostics** — `/nmshook` lists hooks with call counts, timings and failures; enable/disable at runtime;
   bytecode dump in debug mode.
-- **Folia compatible** — Per-thread Mixin instances, no global mutable state on the hot path.
+- **Thread-safe** — Per-thread Mixin instances, lock-free dispatch (Folia-ready design; not yet declared `folia-supported`).
 
 ## Requirements
 
@@ -29,42 +42,84 @@ Built on [ByteBuddy](https://bytebuddy.net/) + [paperweight-userdev](https://git
 - Paper 26.1 – 26.3
 - ByteBuddy 1.18+ (bundled)
 
-## Quick Start
+## Installation (server owners)
 
-### Lambda API
+1. Paper **26.1 – 26.3**, Java **25+**.
+2. Put `NMSHook-<version>.jar` in `plugins/`.
+3. Recommended — start the server with NMSHook as a Java agent (avoids a harmless JVM warning):
 
-```java
-HookHandle handle = NMSHookLib.hook()
-    .owner(this)
-    .target(ServerPlayer.class)
-    .method("hurtServer")
-    .params(ServerLevel.class, DamageSource.class, float.class)   // optional: one overload only
-    .at(HookPoint.BEFORE)
-    .cancellable(true)
-    .listener(ctx -> {
-        float damage = ctx.getArg(2);
-        if (damage > 20f) ctx.cancel();
-    })
-    .register();
+   ```bash
+   java -javaagent:plugins/NMSHook-<version>.jar -jar paper.jar --nogui
+   ```
 
-handle.unregister(); // optional — done automatically when your plugin is disabled
+Manage hooks in game with `/nmshook` (permission `nmshook.admin`). Details: [Server setup](docs/server-setup.md).
+
+## Usage (plugin developers)
+
+### 1. Dependency
+
+```kotlin
+repositories {
+    mavenCentral()
+    maven("https://repo.papermc.io/repository/maven-public/")
+    maven("https://jitpack.io")
+}
+
+dependencies {
+    compileOnly("com.github.seraphicness.NMSHook:nmshook-api:TAG") // TAG = release tag, e.g. v0.1.0
+}
 ```
 
-The overload can also be given as a descriptor: `.method("hurtServer(Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/world/damagesource/DamageSource;F)Z")`.
+Use `compileOnly` — **never shade the API**; the classes come from the NMSHook plugin at runtime.
+To reference NMS classes such as `ServerPlayer` at compile time, use
+[paperweight-userdev](https://docs.papermc.io/paper/dev/userdev/) **without `reobfJar`** (Paper 26.x runs
+with Mojang names and no longer remaps plugins). Maven setup: [Getting started](docs/getting-started.md).
 
-### Annotation API
+### 2. paper-plugin.yml
+
+```yaml
+dependencies:
+  server:
+    NMSHook:
+      load: BEFORE
+      required: true
+      join-classpath: true
+```
+
+(classic `plugin.yml`: `depend: [NMSHook]`)
+
+### 3. Register hooks in `onEnable`
+
+**Lambda**
+
+```java
+@Override
+public void onEnable() {
+    HookHandle handle = NMSHookLib.hook()
+            .owner(this)
+            .target(ServerPlayer.class)
+            .method("hurtServer")
+            .params(ServerLevel.class, DamageSource.class, float.class)   // optional: one overload only
+            .at(HookPoint.BEFORE)
+            .cancellable(true)
+            .listener(ctx -> {
+                float damage = ctx.getArg(2);
+                if (damage > 20f) ctx.cancel();
+            })
+            .register();
+}
+```
+
+**Mixin**
 
 ```java
 @NMSMixin(target = ServerPlayer.class)
 public abstract class ServerPlayerHook {
 
-    @Shadow
-    private float lastSentHealth;
+    @Shadow private float lastSentHealth;          // copied from / written back to the player
+    @Shadow abstract boolean isSpectator();        // forwarded to the real method
 
-    @Shadow
-    abstract boolean isSpectator();          // forwarded to the real ServerPlayer method
-
-    // Declaring the target's parameters selects that overload automatically
+    // declaring the target's parameters selects that overload
     @Inject(method = "hurtServer", at = @At("HEAD"), cancellable = true)
     private void onHurt(ServerLevel level, DamageSource source, float amount, CallbackInfoReturnable<Boolean> cir) {
         if (lastSentHealth <= 5f || isSpectator()) {
@@ -73,67 +128,29 @@ public abstract class ServerPlayerHook {
         }
     }
 
-    @Inject(method = "die", at = @At("TAIL"))
-    private void onDie(DamageSource source, CallbackInfo ci) {
-        // runs after the original method
-    }
-
     @ModifyArg(method = "hurtServer", index = 2)
-    private float onDamage(float damage) {
+    private float halve(float damage) {
         return damage * 0.5f;
     }
 
-    @Overwrite
-    public void attack(Entity target) {
-        // completely replaces the original method
-    }
-}
-```
-
-Register in your plugin:
-
-```java
-@Override
-public void onEnable() {
-    NMSHookLib.registerMixin(ServerPlayerHook.class, this);
-}
-// no onDisable cleanup needed: NMSHook removes your hooks when your plugin is disabled
-```
-
-### Instruction-level hooks
-
-```java
-@NMSMixin(target = ServerPlayer.class)
-public class TickHooks {
-
-    // Before (or after, shift = AFTER) a call inside the method. Cancelling returns from tick() early.
-    @Inject(method = "tick", at = @At(value = "INVOKE",
-            target = "Lnet/minecraft/server/level/ServerPlayer;doTick()V"), cancellable = true)
-    private void beforeDoTick(CallbackInfo ci) { }
-
-    // Replace a call: (receiver, call args...) -> call return type
     @Redirect(method = "tick", at = @At(value = "INVOKE",
-            target = "Lnet/minecraft/server/level/ServerPlayer;doTick()V"))
-    private void wrapDoTick(ServerPlayer self) {
-        self.doTick();
-    }
+            target = "Lnet/minecraft/world/entity/Entity;discard()V"))
+    private void keep(Entity entity) { }
 
-    // Change a local variable when it is stored (or loaded, @At("LOAD")); index = JVM local slot
-    @ModifyVariable(method = "someMethod", index = 3, at = @At(value = "STORE", ordinal = 0))
-    private int clamp(int value) {
-        return Math.min(value, 20);
-    }
-
-    // Change what the method returns
     @ModifyReturnValue(method = "isInvulnerableTo")
-    private boolean neverInvulnerable(boolean original) {
+    private boolean never(boolean original) {
         return false;
     }
 }
 ```
 
-These rewrite single instructions with `invokedynamic`, so they compose with each other and with
-HEAD/TAIL hooks on the same method. If a `@Redirect` handler throws, the original call runs instead.
+```java
+NMSHookLib.registerMixin(ServerPlayerHook.class, this);
+```
+
+No `onDisable` code is needed: when your plugin is disabled, its hooks are removed and the original
+server code is restored. Mistakes (wrong name, descriptor, signature) throw `HookTargetException` at
+registration with an explanation. Full reference: [Lambda API](docs/lambda-api.md), [Mixin API](docs/mixin-api.md).
 
 ## Annotations
 
@@ -248,73 +265,28 @@ Each instrumented class has one *plan* (all its hooks). Every change re-transfor
 its original bytecode, so the result does not depend on registration order, and removing the last hook
 restores the original class.
 
-## Configuration
-
-### Debug Mode
-
-Set `debug: true` in `config.yml`, run `/nmshook debug on`, or add `-Dnmshook.debug=true` to the JVM args.
-Transformed bytecode is dumped to `plugins/NMSHook/debug/` and phases slower than `slow-threshold-ms` are logged.
-
-### javaagent Mode (recommended — no JVM warnings)
-
-Start the server with NMSHook as a javaagent:
-
-```
-java -javaagent:plugins/NMSHook-0.1.0-SNAPSHOT.jar -jar paper.jar
-```
-
-The plugin then uses the Instrumentation from `premain` and never self-attaches,
-so the JVM's *"A Java agent has been loaded dynamically"* warning is never printed.
-The jar stays in `plugins/` and is loaded as a normal plugin as well.
-
-Without `-javaagent`, NMSHook falls back to dynamic attach (once per JVM — reloads reuse
-the same Instrumentation). In that case you can hide the warning with:
-
-```
--XX:+EnableDynamicAgentLoading   # hide dynamic agent loading warning
-```
-
-The bootstrap dispatcher is defined directly in the boot class loader (no class path append), so the
-CDS warning *"Sharing is only supported for boot loader classes..."* is not printed and `-Xshare:off` is not needed.
-
 ## Building
 
 ```bash
-./gradlew build
+./gradlew build                 # plugin jar: nmshook-plugin/build/libs/NMSHook-<version>.jar
+./gradlew :nmshook-core:test    # instrumentation tests (retransform real classes in the test JVM)
+./gradlew :nmshook-api:publishToMavenLocal   # API jar + sources + javadoc into ~/.m2
 ```
 
-Requires JDK 25 (downloaded automatically via the Gradle toolchain resolver if missing).
-`./gradlew :nmshook-core:test` runs the instrumentation tests (they retransform real classes in the test JVM).
+Requires JDK 25 (downloaded automatically by the Gradle toolchain resolver if missing).
 
-Output: `nmshook-plugin/build/libs/NMSHook-<version>.jar`
+### Releasing the API
 
-## Dependency (for plugin developers)
+Push a tag; JitPack builds `nmshook-api` from it on first request (see `jitpack.yml`):
 
-Add `nmshook-api` as a compile-only dependency:
-
-```kotlin
-repositories {
-    // your NMSHook repository
-}
-
-dependencies {
-    compileOnly("dev.seraphicness.nmshook:nmshook-api:0.1.0-SNAPSHOT")
-}
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+# -> com.github.seraphicness.NMSHook:nmshook-api:v0.1.0
 ```
 
-Since Minecraft 26.1 the server is unobfuscated and Paper no longer remaps plugins.
-If your plugin references NMS classes, build it with Mojang names (paperweight-userdev
-without a `reobfJar` step). Spigot-mapped (reobfuscated) jars will not work on 26.x.
-
-And declare the dependency in `paper-plugin.yml`:
-
-```yaml
-dependencies:
-  server:
-    NMSHook:
-      load: BEFORE
-      required: true
-```
+The API can also be published to GitHub Packages with
+`./gradlew :nmshook-api:publishAllPublicationsToGitHubPackagesRepository` (needs `GITHUB_ACTOR` /
+`GITHUB_TOKEN`; consumers of GitHub Packages need a token too, so JitPack is the default).
 
 ## License
 

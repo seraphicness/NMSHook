@@ -1,0 +1,6 @@
+# JitPack: https://jitpack.io/#seraphicness/NMSHook
+# Gradle runs on JDK 21; the JDK 25 toolchain is downloaded by the foojay resolver.
+jdk:
+  - openjdk21
+install:
+  - ./gradlew :nmshook-api:publishToMavenLocal -x test --no-daemon
