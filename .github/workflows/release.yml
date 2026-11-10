@@ -1,14 +1,18 @@
 name: Release
 
-# Actions -> Release -> Run workflow -> enter a version (e.g. 0.1.0).
-# Builds and tests, then creates the tag v<version> and a GitHub release with the plugin jar.
+# Releases happen automatically when `nmshookVersion` in gradle.properties changes on master:
+# build + test, tag v<version>, GitHub release with the plugin and API jars.
 # The tag also makes the API available on JitPack: com.github.seraphicness.NMSHook:nmshook-api:v<version>
+# It can also be started by hand: Actions -> Release -> Run workflow.
 on:
+  push:
+    branches: [master]
+    paths: [gradle.properties]
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version without "v" (e.g. 0.1.0)'
-        required: true
+        description: 'Version without "v" (empty = value from gradle.properties)'
+        required: false
 
 permissions:
   contents: write
@@ -17,25 +21,38 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - name: Check version format
-        run: |
-          [[ "${{ inputs.version }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$ ]] \
-            || { echo "Invalid version: ${{ inputs.version }}"; exit 1; }
       - uses: actions/checkout@v4
+      - name: Determine version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          VERSION="${INPUT_VERSION:-$(sed -n 's/^nmshookVersion=//p' gradle.properties | tr -d '[:space:]')}"
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$ ]] || { echo "Invalid version: $VERSION"; exit 1; }
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" > /dev/null; then
+            echo "Tag v$VERSION already exists, nothing to release."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/setup-java@v4
+        if: steps.version.outputs.exists != 'true'
         with:
           distribution: temurin
           java-version: '25'
       - uses: gradle/actions/setup-gradle@v4
+        if: steps.version.outputs.exists != 'true'
       - name: Build and test
-        run: ./gradlew build -PreleaseVersion=${{ inputs.version }} --no-daemon
+        if: steps.version.outputs.exists != 'true'
+        run: ./gradlew build -PreleaseVersion=${{ steps.version.outputs.version }} --no-daemon
       - name: Create tag and release
+        if: steps.version.outputs.exists != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          gh release create "v${{ inputs.version }}" \
-            "nmshook-plugin/build/libs/NMSHook-${{ inputs.version }}.jar" \
-            "nmshook-api/build/libs/nmshook-api-${{ inputs.version }}.jar" \
-            --target "${{ github.sha }}" \
-            --title "NMSHook ${{ inputs.version }}" \
+          gh release create "v$VERSION" \
+            "nmshook-plugin/build/libs/NMSHook-$VERSION.jar" \
+            "nmshook-api/build/libs/nmshook-api-$VERSION.jar" \
+            --target "$GITHUB_SHA" \
+            --title "NMSHook $VERSION" \
             --generate-notes

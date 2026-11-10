@@ -286,10 +286,11 @@ Requires JDK 25 (downloaded automatically by the Gradle toolchain resolver if mi
 
 Everything runs on GitHub — no local checkout needed:
 
-1. **Actions → Release → Run workflow**, enter a version such as `0.1.0`.
-2. The workflow builds and tests with JDK 25, creates the tag `v0.1.0`, and publishes a GitHub release with
-   `NMSHook-0.1.0.jar` (server plugin) and `nmshook-api-0.1.0.jar`.
-3. The tag makes the API available on JitPack: `com.github.seraphicness.NMSHook:nmshook-api:v0.1.0`
+1. Change `nmshookVersion` in `gradle.properties` (e.g. `0.2.0`) and merge it into `master`.
+2. The **Release** workflow builds and tests with JDK 25, creates the tag `v0.2.0`, and publishes a GitHub
+   release with `NMSHook-0.2.0.jar` (server plugin) and `nmshook-api-0.2.0.jar`.
+   It can also be started by hand: **Actions → Release → Run workflow**.
+3. The tag makes the API available on JitPack: `com.github.seraphicness.NMSHook:nmshook-api:v0.2.0`
    (the first request triggers the JitPack build, see `jitpack.yml`).
 
 Every push to `master` and every pull request is built by **Actions → Build**; the plugin jar is attached
