@@ -13,5 +13,6 @@ dependencies {
 
 tasks.test {
     // Tests self-attach an agent to retransform their own target classes.
-    jvmArgs("-XX:+EnableDynamicAgentLoading", "-Djdk.attach.allowAttachSelf=true")
+    jvmArgs("-XX:+EnableDynamicAgentLoading", "-Djdk.attach.allowAttachSelf=true", "--sun-misc-unsafe-memory-access=debug")
+    testLogging { showStandardStreams = true }
 }

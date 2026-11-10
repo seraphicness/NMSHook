@@ -355,7 +355,7 @@ public final class ClassRewriter {
             }
             return true;
         } catch (ReflectiveOperationException | RuntimeException | LinkageError e) {
-            LOGGER.log(Level.FINE, "Direct bootstrap definition unavailable", e);
+            LOGGER.log(Level.WARNING, "DIAG Direct bootstrap definition unavailable", e);
             return false;
         }
     }
