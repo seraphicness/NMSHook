@@ -1,5 +1,7 @@
 package dev.seraphicness.nmshook.api.hook;
 
+import dev.seraphicness.nmshook.api.target.MethodSelector;
+
 /**
  * DTO for a lambda hook registration request.
  * Created by {@link dev.seraphicness.nmshook.api.HookBuilder} and
@@ -8,7 +10,7 @@ package dev.seraphicness.nmshook.api.hook;
 public record HookRequest(
         Object owner,
         Class<?> target,
-        String method,
+        MethodSelector method,
         HookPoint at,
         boolean cancellable,
         int priority,

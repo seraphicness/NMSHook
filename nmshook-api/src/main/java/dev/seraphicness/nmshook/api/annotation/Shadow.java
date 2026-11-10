@@ -7,7 +7,12 @@ import java.lang.annotation.Target;
 
 /**
  * Makes a field or method of the target class accessible from the Mixin class.
- * Bound to the actual member at runtime via FieldProxy or reflection.
+ * <ul>
+ *   <li>Fields: copied from the target instance before the handler runs and written back afterwards
+ *       (matched by name, searched up the class hierarchy).</li>
+ *   <li>Methods: declare them {@code abstract}; calls are forwarded to the target instance's method
+ *       with the same name and parameter types.</li>
+ * </ul>
  */
 @Target({ElementType.FIELD, ElementType.METHOD})
 @Retention(RetentionPolicy.RUNTIME)

@@ -1,6 +1,5 @@
 package dev.seraphicness.nmshook.mixin;
 
-import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
 

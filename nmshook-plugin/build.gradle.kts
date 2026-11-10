@@ -18,6 +18,7 @@ dependencies {
     implementation(project(":nmshook-transform"))
     implementation(project(":nmshook-agent"))
     implementation(project(":nmshook-resolver"))
+    implementation(project(":nmshook-core"))
     implementation("net.bytebuddy:byte-buddy:1.18.16")
 }
 

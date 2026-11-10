@@ -1,0 +1,15 @@
+# NMSHook configuration — reload with /nmshook reload
+
+# A hook that throws this many times in a row is disabled (re-enable with /nmshook enable <id>).
+# 0 = never disable.
+failure-threshold: 10
+
+# Record per-hook execution time (shown by /nmshook list). Can also be toggled with /nmshook profile on|off.
+profiling: false
+
+# Dump transformed classes to plugins/NMSHook/debug/ and log slow hook phases.
+# Also enabled by the JVM flag -Dnmshook.debug=true
+debug: false
+
+# Slow-phase threshold for debug logging, in milliseconds.
+slow-threshold-ms: 1.0

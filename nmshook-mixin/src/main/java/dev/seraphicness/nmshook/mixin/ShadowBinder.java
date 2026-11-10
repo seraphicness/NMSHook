@@ -1,16 +1,20 @@
 package dev.seraphicness.nmshook.mixin;
 
 import dev.seraphicness.nmshook.api.annotation.Shadow;
+import dev.seraphicness.nmshook.api.target.HookTargetException;
 
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.logging.Logger;
 
 /**
- * Binds {@code @Shadow} fields of a Mixin class to the actual fields of the target NMS class.
- * At runtime, copies values from the target instance to the Mixin instance so that
- * handler methods can access target fields via {@code this.field}.
+ * Binds {@code @Shadow} members of a Mixin class to the actual members of the target NMS class.
  */
 public final class ShadowBinder {
 
@@ -25,35 +29,72 @@ public final class ShadowBinder {
 
         for (Field mixinField : mixinClass.getDeclaredFields()) {
             if (!mixinField.isAnnotationPresent(Shadow.class)) continue;
-
+            Field targetField;
             try {
-                Field targetField = findField(targetClass, mixinField.getName());
-                mixinField.setAccessible(true);
-                targetField.setAccessible(true);
-                bindings.add(new ShadowBinding(mixinField, targetField));
-                LOGGER.fine(() -> "@Shadow binding: %s.%s -> %s.%s".formatted(
-                        mixinClass.getSimpleName(), mixinField.getName(),
-                        targetClass.getSimpleName(), targetField.getName()));
+                targetField = findField(targetClass, mixinField.getName());
             } catch (NoSuchFieldException e) {
-                LOGGER.warning("@Shadow target field not found: %s.%s -> %s".formatted(
-                        mixinClass.getSimpleName(), mixinField.getName(),
-                        targetClass.getSimpleName()));
+                throw new HookTargetException("@Shadow field not found: %s.%s (looked in %s and its superclasses)"
+                        .formatted(mixinClass.getSimpleName(), mixinField.getName(), targetClass.getName()));
             }
+            if (!mixinField.getType().isAssignableFrom(targetField.getType())) {
+                throw new HookTargetException("@Shadow field %s.%s has type %s but %s.%s is %s".formatted(
+                        mixinClass.getSimpleName(), mixinField.getName(), mixinField.getType().getName(),
+                        targetField.getDeclaringClass().getSimpleName(), targetField.getName(),
+                        targetField.getType().getName()));
+            }
+            mixinField.setAccessible(true);
+            targetField.setAccessible(true);
+            bindings.add(new ShadowBinding(mixinField, targetField));
+            LOGGER.fine(() -> "@Shadow binding: %s.%s -> %s.%s".formatted(
+                    mixinClass.getSimpleName(), mixinField.getName(),
+                    targetClass.getSimpleName(), targetField.getName()));
         }
-
         return bindings;
     }
 
-    /** Searches for a field in the target class and its superclasses. */
+    /**
+     * Resolves abstract {@code @Shadow} methods of the Mixin class to methods of the target class
+     * (same name and parameter types, searched up the hierarchy).
+     */
+    public static Map<Method, Method> analyzeMethods(Class<?> mixinClass, Class<?> targetClass) {
+        Map<Method, Method> result = new HashMap<>();
+        for (Method m : mixinClass.getDeclaredMethods()) {
+            if (!m.isAnnotationPresent(Shadow.class)) continue;
+            if (!Modifier.isAbstract(m.getModifiers())) {
+                throw new HookTargetException("@Shadow method %s.%s must be abstract".formatted(
+                        mixinClass.getSimpleName(), m.getName()));
+            }
+            Method target = findMethod(targetClass, m.getName(), m.getParameterTypes());
+            if (target == null) {
+                throw new HookTargetException("@Shadow method not found: %s(%s) in %s".formatted(m.getName(),
+                        String.join(", ", Arrays.stream(m.getParameterTypes()).map(Class::getSimpleName).toList()),
+                        targetClass.getName()));
+            }
+            target.setAccessible(true);
+            result.put(m, target);
+        }
+        return result;
+    }
+
     private static Field findField(Class<?> clazz, String name) throws NoSuchFieldException {
-        Class<?> current = clazz;
-        while (current != null) {
+        for (Class<?> c = clazz; c != null; c = c.getSuperclass()) {
             try {
-                return current.getDeclaredField(name);
-            } catch (NoSuchFieldException e) {
-                current = current.getSuperclass();
+                return c.getDeclaredField(name);
+            } catch (NoSuchFieldException ignored) {
+                // continue with superclass
             }
         }
         throw new NoSuchFieldException(name + " in " + clazz.getName());
+    }
+
+    private static Method findMethod(Class<?> clazz, String name, Class<?>[] params) {
+        for (Class<?> c = clazz; c != null; c = c.getSuperclass()) {
+            try {
+                return c.getDeclaredMethod(name, params);
+            } catch (NoSuchMethodException ignored) {
+                // continue with superclass
+            }
+        }
+        return null;
     }
 }

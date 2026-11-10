@@ -13,7 +13,11 @@ import java.lang.annotation.Target;
 @Retention(RetentionPolicy.RUNTIME)
 public @interface ModifyArg {
 
-    /** Target method name. */
+    /**
+     * Target method name, optionally with a JVM descriptor ({@code "name(params)ret"}).
+     * For @Inject without a descriptor, the parameter types are inferred from the handler
+     * when it declares the target's parameters before the CallbackInfo.
+     */
     String method();
 
     /** Index of the parameter to modify (0-based). */

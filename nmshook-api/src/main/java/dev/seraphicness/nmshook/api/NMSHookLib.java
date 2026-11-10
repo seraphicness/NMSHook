@@ -4,8 +4,8 @@ package dev.seraphicness.nmshook.api;
  * Single entry point (Facade) for the NMSHook library.
  * Plugin developers register hooks/Mixins using only this class.
  *
- * <p>The internal engine is injected by the Plugin module at bootstrap time
- * via {@link #bootstrap(NMSHookEngine)}.
+ * <p>Hooks are removed automatically when the plugin that registered them is disabled
+ * (matched by owner, or by the class loader of the listener / Mixin class).
  */
 public final class NMSHookLib {
 
@@ -14,9 +14,13 @@ public final class NMSHookLib {
     private NMSHookLib() {
     }
 
-    /** Called by the Plugin module. Injects the engine implementation. */
+    /** Called by the Plugin module. Injects the engine implementation ({@code null} on shutdown). */
     public static void bootstrap(NMSHookEngine engine) {
         NMSHookLib.engine = engine;
+    }
+
+    public static boolean isAvailable() {
+        return engine != null;
     }
 
     /** Starts a lambda hook builder. */
@@ -25,13 +29,13 @@ public final class NMSHookLib {
     }
 
     /** Registers an @NMSMixin class. */
-    public static void registerMixin(Class<?> mixinClass) {
-        registerMixin(mixinClass, null);
+    public static HookHandle registerMixin(Class<?> mixinClass) {
+        return registerMixin(mixinClass, null);
     }
 
     /** Registers an @NMSMixin class, associated with the specified owner. */
-    public static void registerMixin(Class<?> mixinClass, Object owner) {
-        engine().registerMixin(mixinClass, owner);
+    public static HookHandle registerMixin(Class<?> mixinClass, Object owner) {
+        return engine().registerMixin(mixinClass, owner);
     }
 
     /** Unregisters all hooks/Mixins for a specific owner. */

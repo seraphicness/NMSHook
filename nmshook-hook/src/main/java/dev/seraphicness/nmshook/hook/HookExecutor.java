@@ -1,104 +1,158 @@
 package dev.seraphicness.nmshook.hook;
 
 import dev.seraphicness.nmshook.api.NMSHookDebug;
-import dev.seraphicness.nmshook.api.hook.HookContext;
-import dev.seraphicness.nmshook.api.hook.HookPoint;
 
-import java.util.List;
+import java.lang.reflect.InvocationTargetException;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * Hook execution Domain Service.
- * Called from the HookDispatcher handler function to execute
- * registered listeners in priority order.
+ * Executes hooks with failure isolation.
  *
- * <p>Execution order:
- * <ol>
- *   <li>REPLACE — if present, skips the original and uses a substitute return value</li>
- *   <li>BEFORE — can be cancelled; if cancelled, the original is skipped</li>
- *   <li>(original method execution)</li>
- *   <li>AFTER — can modify the return value</li>
- * </ol>
+ * <ul>
+ *   <li>A throwing hook never breaks the hooked NMS method: the failure is logged and the
+ *       method continues as if the hook were absent.</li>
+ *   <li>Circuit breaker: after {@link #getFailureThreshold()} consecutive failures the hook is
+ *       disabled (re-enable with {@code /nmshook enable <id>}). The first failure is logged with its
+ *       stack trace, later ones only at FINE level, so a broken hook cannot flood the console.</li>
+ *   <li>Statistics: call counts always; execution time when profiling/debug is on.</li>
+ * </ul>
+ *
+ * <p>Execution order for a method: REPLACE (first enabled one) → BEFORE (priority order, may cancel)
+ * → original → AFTER (priority order, may change the return value).
  */
 public final class HookExecutor {
 
-    private static final Logger LOGGER = Logger.getLogger(HookExecutor.class.getName());
+    private final Logger logger;
+    private volatile int failureThreshold = 10;
 
-    private final HookRegistry registry;
-
-    public HookExecutor(HookRegistry registry) {
-        this.registry = registry;
+    public HookExecutor(Logger logger) {
+        this.logger = logger;
     }
 
-    public record BeforeResult(boolean cancelled, Object returnValue) {
+    public int getFailureThreshold() {
+        return failureThreshold;
+    }
+
+    /** 0 disables the circuit breaker. */
+    public void setFailureThreshold(int threshold) {
+        this.failureThreshold = Math.max(0, threshold);
     }
 
     /**
-     * Executes REPLACE + BEFORE hooks in order.
+     * Runs REPLACE + BEFORE hooks.
      *
-     * @return if cancelled=true, the original method is skipped
+     * @return {@code null} to run the original method, or {@code Object[]{returnValue}} to skip it
      */
-    public BeforeResult handleBeforePhase(Class<?> targetClass, String methodName, HookContext ctx) {
-        long start = NMSHookDebug.isEnabled() ? System.nanoTime() : 0;
-
-        // 1. REPLACE hooks (highest priority — only the first is executed)
-        List<HookDefinition> replaceHooks = registry.findHooks(targetClass, methodName, HookPoint.REPLACE);
-        if (!replaceHooks.isEmpty()) {
-            HookDefinition replace = replaceHooks.getFirst();
-            try {
-                replace.getListener().onHook(ctx);
-            } catch (Exception e) {
-                LOGGER.log(Level.WARNING, "REPLACE hook exception: " + replace.getId(), e);
-            }
-            return new BeforeResult(true, ctx.getReturnValue());
-        }
-
-        // 2. BEFORE hooks (in priority order)
-        List<HookDefinition> beforeHooks = registry.findHooks(targetClass, methodName, HookPoint.BEFORE);
-        for (HookDefinition hook : beforeHooks) {
-            try {
-                hook.getListener().onHook(ctx);
-                if (ctx.isCancelled() && hook.isCancellable()) {
-                    return new BeforeResult(true, ctx.getReturnValue());
+    public Object[] runEnter(HookDefinition[] replace, HookDefinition[] before, DefaultHookContext ctx) {
+        long phaseStart = NMSHookDebug.isEnabled() ? System.nanoTime() : 0;
+        try {
+            for (HookDefinition hook : replace) {
+                if (!hook.isEnabled()) continue;
+                if (invoke(hook, ctx)) {
+                    return new Object[]{ctx.getReturnValue()};
                 }
-            } catch (Exception e) {
-                LOGGER.log(Level.WARNING, "BEFORE hook exception: " + hook.getId(), e);
+                // a failed REPLACE falls back to the original method
+                break;
             }
+            for (HookDefinition hook : before) {
+                if (!hook.isEnabled()) continue;
+                boolean ok = invoke(hook, ctx);
+                if (ctx.isCancelled()) {
+                    if (ok && hook.isCancellable()) return new Object[]{ctx.getReturnValue()};
+                    // cancel() from a non-cancellable (or failed) hook is ignored and must not leak
+                    // into the next hook
+                    ctx.clearCancelled();
+                }
+            }
+            return null;
+        } finally {
+            logSlowPhase("BEFORE", ctx, phaseStart);
         }
+    }
 
-        if (NMSHookDebug.isEnabled()) {
-            long elapsed = System.nanoTime() - start;
-            if (elapsed > NMSHookDebug.getSlowThreshold()) {
-                LOGGER.warning("[Debug] Slow BEFORE phase: %s#%s took %dms"
-                        .formatted(targetClass.getSimpleName(), methodName, elapsed / 1_000_000));
-            }
+    /** Runs AFTER hooks; returns the (possibly modified) return value from the context. */
+    public Object runExit(HookDefinition[] after, DefaultHookContext ctx) {
+        long phaseStart = NMSHookDebug.isEnabled() ? System.nanoTime() : 0;
+        for (HookDefinition hook : after) {
+            if (hook.isEnabled()) invoke(hook, ctx);
         }
-        return new BeforeResult(false, null);
+        logSlowPhase("AFTER", ctx, phaseStart);
+        return ctx.getReturnValue();
     }
 
     /**
-     * Executes AFTER hooks and returns the (possibly modified) return value.
+     * Runs a point handler.
+     *
+     * @return the handler result, or {@code pass} if the hook is disabled or failed
      */
-    public Object handleAfterPhase(Class<?> targetClass, String methodName, HookContext ctx) {
-        long start = NMSHookDebug.isEnabled() ? System.nanoTime() : 0;
-
-        List<HookDefinition> afterHooks = registry.findHooks(targetClass, methodName, HookPoint.AFTER);
-        for (HookDefinition hook : afterHooks) {
-            try {
-                hook.getListener().onHook(ctx);
-            } catch (Exception e) {
-                LOGGER.log(Level.WARNING, "AFTER hook exception: " + hook.getId(), e);
-            }
+    public Object runPoint(HookDefinition hook, Object[] operands, Object pass) {
+        if (!hook.isEnabled()) return pass;
+        boolean timed = NMSHookDebug.isProfiling();
+        long start = timed ? System.nanoTime() : 0;
+        try {
+            Object result = hook.getPointHandler().handle(operands);
+            hook.recordSuccess();
+            return result;
+        } catch (Throwable t) {
+            onFailure(hook, t);
+            return pass;
+        } finally {
+            hook.recordCall(timed ? System.nanoTime() - start : 0);
         }
+    }
 
-        if (NMSHookDebug.isEnabled()) {
-            long elapsed = System.nanoTime() - start;
-            if (elapsed > NMSHookDebug.getSlowThreshold()) {
-                LOGGER.warning("[Debug] Slow AFTER phase: %s#%s took %dms"
-                        .formatted(targetClass.getSimpleName(), methodName, elapsed / 1_000_000));
-            }
+    /** Reports a failure detected outside the handler (e.g. a result of the wrong type). */
+    public void reportFailure(HookDefinition hook, Throwable t) {
+        onFailure(hook, t);
+    }
+
+    /** @return true if the listener completed normally */
+    private boolean invoke(HookDefinition hook, DefaultHookContext ctx) {
+        boolean timed = NMSHookDebug.isProfiling();
+        long start = timed ? System.nanoTime() : 0;
+        try {
+            hook.getListener().onHook(ctx);
+            hook.recordSuccess();
+            return true;
+        } catch (Throwable t) {
+            onFailure(hook, t);
+            return false;
+        } finally {
+            hook.recordCall(timed ? System.nanoTime() - start : 0);
         }
-        return ctx.getReturnValue();
+    }
+
+    private void onFailure(HookDefinition hook, Throwable t) {
+        Throwable cause = unwrap(t);
+        if (cause instanceof VirtualMachineError vme) throw vme;
+        int consecutive = hook.recordFailure();
+        int threshold = failureThreshold;
+        if (consecutive == 1) {
+            logger.log(Level.WARNING, "Hook " + hook + " threw an exception", cause);
+        } else {
+            logger.log(Level.FINE, "Hook " + hook + " failed again (" + consecutive + " in a row)", cause);
+        }
+        if (threshold > 0 && consecutive >= threshold && hook.isEnabled()) {
+            hook.disable(consecutive + " consecutive failures, last: " + cause);
+            logger.severe("Hook " + hook + " disabled after " + consecutive + " consecutive failures (last: "
+                    + cause + "). Fix it and run /nmshook enable " + hook.getId());
+        }
+    }
+
+    private static Throwable unwrap(Throwable t) {
+        while (t instanceof InvocationTargetException ite && ite.getCause() != null) {
+            t = ite.getCause();
+        }
+        return t;
+    }
+
+    private void logSlowPhase(String phase, DefaultHookContext ctx, long start) {
+        if (start == 0) return;
+        long elapsed = System.nanoTime() - start;
+        if (elapsed > NMSHookDebug.getSlowThreshold()) {
+            logger.warning("[Debug] Slow %s phase: %s#%s took %.2fms".formatted(phase,
+                    ctx.getTargetClass().getSimpleName(), ctx.getMethodName(), elapsed / 1_000_000.0));
+        }
     }
 }

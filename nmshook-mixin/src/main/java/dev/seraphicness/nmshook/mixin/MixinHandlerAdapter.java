@@ -3,173 +3,245 @@ package dev.seraphicness.nmshook.mixin;
 import dev.seraphicness.nmshook.api.callback.CallbackInfo;
 import dev.seraphicness.nmshook.api.callback.CallbackInfoReturnable;
 import dev.seraphicness.nmshook.api.hook.HookListener;
+import dev.seraphicness.nmshook.hook.PointHandler;
+import net.bytebuddy.ByteBuddy;
+import net.bytebuddy.ClassFileVersion;
+import net.bytebuddy.dynamic.loading.ClassLoadingStrategy;
+import net.bytebuddy.implementation.InvocationHandlerAdapter;
+import net.bytebuddy.matcher.ElementMatchers;
 
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * Adapter that converts a {@link MixinMethod} into a {@link HookListener}.
+ * Turns the handler methods of one Mixin registration into hook listeners / point handlers.
  *
- * <p>Wraps the Mixin class handler methods via reflection to produce
- * listeners that can be registered in the HookRegistry.
- *
- * <p>Flow: hook triggered -> @Shadow binding -> handler argument assembly -> reflective invocation
- * -> apply CallbackInfo result (cancel / modify return value)
+ * <ul>
+ *   <li>Each thread gets its own Mixin instance (Folia: regions tick on different threads).</li>
+ *   <li>{@code @Shadow} fields are copied from the target instance before the handler and written back after.</li>
+ *   <li>Abstract {@code @Shadow} methods are implemented by forwarding to the current target instance.</li>
+ *   <li>Exceptions thrown by handlers propagate to the executor (failure counting / circuit breaker).</li>
+ * </ul>
  */
 public final class MixinHandlerAdapter {
 
     private static final Logger LOGGER = Logger.getLogger(MixinHandlerAdapter.class.getName());
 
     private final MixinDefinition definition;
-    private final ThreadLocal<Object> mixinInstances;
     private final List<ShadowBinder.ShadowBinding> shadowBindings;
+    private final Map<Method, Method> shadowMethods;
+    private final Class<?> concreteClass;
+    private final ThreadLocal<Object> mixinInstances;
+    private final ThreadLocal<Object> currentTarget = new ThreadLocal<>();
 
-    /**
-     * @param definition the parsed NMSMixin definition
-     * @param mixinInstance a concrete instance of the hook class (created externally)
-     */
-    public MixinHandlerAdapter(MixinDefinition definition, Object mixinInstance) {
+    public MixinHandlerAdapter(MixinDefinition definition) {
         this.definition = definition;
-        this.mixinInstances = ThreadLocal.withInitial(() -> cloneInstance(mixinInstance));
-        this.shadowBindings = ShadowBinder.analyze(
-                definition.getMixinClass(), definition.getTargetClass());
+        Class<?> mixinClass = definition.getMixinClass();
+        this.shadowBindings = ShadowBinder.analyze(mixinClass, definition.getTargetClass());
+        this.shadowMethods = ShadowBinder.analyzeMethods(mixinClass, definition.getTargetClass());
+        this.concreteClass = concreteClass(mixinClass);
+        Object first = newInstance(); // fail fast at registration if it cannot be instantiated
+        this.mixinInstances = ThreadLocal.withInitial(this::newInstance);
+        this.mixinInstances.set(first);
     }
 
-    private static Object cloneInstance(Object template) {
+    private Class<?> concreteClass(Class<?> mixinClass) {
+        if (!Modifier.isAbstract(mixinClass.getModifiers())) return mixinClass;
+        InvocationHandler forward = (proxy, method, args) -> {
+            Method target = shadowMethods.get(method);
+            if (target == null) {
+                throw new AbstractMethodError(method + " is abstract and not annotated with @Shadow");
+            }
+            Object self = Modifier.isStatic(target.getModifiers()) ? null : currentTarget.get();
+            if (self == null && !Modifier.isStatic(target.getModifiers())) {
+                throw new IllegalStateException("@Shadow method " + method.getName()
+                        + " called outside of a hook on an instance method");
+            }
+            try {
+                return target.invoke(self, args == null ? new Object[0] : args);
+            } catch (InvocationTargetException e) {
+                throw e.getCause();
+            }
+        };
+        return new ByteBuddy(ClassFileVersion.ofThisVm(ClassFileVersion.JAVA_V21))
+                .subclass(mixinClass)
+                .name(mixinClass.getName() + "$NMSHookImpl")
+                .method(ElementMatchers.isAbstract())
+                .intercept(InvocationHandlerAdapter.of(forward))
+                .make()
+                // same ClassLoader and package as the Mixin, so package-private @Shadow methods can be implemented
+                .load(mixinClass.getClassLoader(), sameLoaderStrategy(mixinClass))
+                .getLoaded();
+    }
+
+    private static ClassLoadingStrategy<ClassLoader> sameLoaderStrategy(Class<?> mixinClass) {
         try {
-            return template.getClass().getDeclaredConstructor().newInstance();
-        } catch (Exception e) {
-            throw new RuntimeException(
-                    "Failed to create thread-local hook instance for " + template.getClass().getName()
-                    + ". Ensure the concrete subclass has a no-arg constructor.", e);
+            return ClassLoadingStrategy.UsingLookup.of(
+                    java.lang.invoke.MethodHandles.privateLookupIn(mixinClass, java.lang.invoke.MethodHandles.lookup()));
+        } catch (IllegalAccessException e) {
+            throw new IllegalArgumentException("Cannot define the implementation of abstract Mixin "
+                    + mixinClass.getName() + " (package not open to NMSHook)", e);
         }
     }
 
-    /** Creates an appropriate HookListener based on the MixinMethod type. */
+    private Object newInstance() {
+        try {
+            var ctor = concreteClass.getDeclaredConstructor();
+            ctor.setAccessible(true);
+            return ctor.newInstance();
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalArgumentException("Cannot instantiate Mixin " + definition.getMixinClass().getName()
+                    + ". Mixin classes need a no-arg constructor.", e);
+        }
+    }
+
+    // ---------------------------------------------------------------- method advice (HEAD/TAIL/Overwrite/ModifyArg)
+
     public HookListener toListener(MixinMethod mixinMethod) {
         return switch (mixinMethod.getType()) {
-            case INJECT_HEAD -> createInjectListener(mixinMethod, true);
-            case INJECT_TAIL -> createInjectListener(mixinMethod, false);
-            case OVERWRITE -> createOverwriteListener(mixinMethod);
-            case MODIFY_ARG -> createModifyArgListener(mixinMethod);
-            default -> ctx -> {
-            };
+            case INJECT_HEAD, INJECT_TAIL -> injectListener(mixinMethod);
+            case OVERWRITE -> overwriteListener(mixinMethod);
+            case MODIFY_ARG -> modifyArgListener(mixinMethod);
+            default -> throw new IllegalArgumentException(mixinMethod.getType() + " is a point, use toPointHandler");
         };
     }
 
-    /**
-     * Converts an @Inject HEAD/TAIL handler into a HookListener.
-     * Handler signature: (target method args..., CallbackInfo/CallbackInfoReturnable)
-     */
-    private HookListener createInjectListener(MixinMethod mixinMethod, boolean isHead) {
-        Method handler = mixinMethod.getHandlerMethod();
-        handler.setAccessible(true);
-        Class<?>[] paramTypes = handler.getParameterTypes();
-        int paramCount = paramTypes.length;
-
-        boolean returnable = paramCount > 0
-                && CallbackInfoReturnable.class.isAssignableFrom(paramTypes[paramCount - 1]);
-
+    private HookListener injectListener(MixinMethod mixinMethod) {
+        Method handler = accessible(mixinMethod.getHandlerMethod());
+        int paramCount = handler.getParameterCount();
+        boolean returnable = CallbackInfoReturnable.class.isAssignableFrom(handler.getParameterTypes()[paramCount - 1]);
         return ctx -> {
-            try {
-                bindShadows(ctx.getInstance());
-
-                Object[] handlerArgs = new Object[paramCount];
-
-                // Map target method args to handler parameters (the last one is CallbackInfo)
-                Object[] targetArgs = ctx.getArgs();
-                for (int i = 0; i < paramCount - 1 && i < targetArgs.length; i++) {
-                    handlerArgs[i] = targetArgs[i];
-                }
-
-                if (returnable) {
-                    var cir = new CallbackInfoReturnable<>(ctx.getReturnValue());
-                    handlerArgs[paramCount - 1] = cir;
-                    handler.invoke(mixinInstances.get(), handlerArgs);
-                    writeBackShadows(ctx.getInstance());
-                    if (cir.isCancelled()) ctx.cancel();
-                    ctx.setReturnValue(cir.getReturnValue());
-                } else {
-                    var ci = new CallbackInfo();
-                    handlerArgs[paramCount - 1] = ci;
-                    handler.invoke(mixinInstances.get(), handlerArgs);
-                    writeBackShadows(ctx.getInstance());
-                    if (ci.isCancelled()) ctx.cancel();
-                }
-            } catch (Exception e) {
-                LOGGER.log(Level.WARNING, "@Inject handler execution failed: " + handler.getName(), e);
-            }
+            Object[] handlerArgs = mapArguments(ctx.getArgs(), paramCount);
+            CallbackInfo ci = returnable ? new CallbackInfoReturnable<>(ctx.getReturnValue()) : new CallbackInfo();
+            handlerArgs[paramCount - 1] = ci;
+            invoke(handler, ctx.getInstance(), handlerArgs);
+            if (ci instanceof CallbackInfoReturnable<?> cir) ctx.setReturnValue(cir.getReturnValue());
+            if (ci.isCancelled()) ctx.cancel();
         };
     }
 
-    /**
-     * Converts an @Overwrite handler into a REPLACE HookListener.
-     * Handler signature: same as the target method.
-     */
-    private HookListener createOverwriteListener(MixinMethod mixinMethod) {
-        Method handler = mixinMethod.getHandlerMethod();
-        handler.setAccessible(true);
-
-        return ctx -> {
-            try {
-                bindShadows(ctx.getInstance());
-                Object result = handler.invoke(mixinInstances.get(), ctx.getArgs());
-                writeBackShadows(ctx.getInstance());
-                ctx.setReturnValue(result);
-            } catch (Exception e) {
-                LOGGER.log(Level.WARNING, "@Overwrite handler execution failed: " + handler.getName(), e);
-            }
-        };
+    private HookListener overwriteListener(MixinMethod mixinMethod) {
+        Method handler = accessible(mixinMethod.getHandlerMethod());
+        return ctx -> ctx.setReturnValue(invoke(handler, ctx.getInstance(), ctx.getArgs().clone()));
     }
 
-    /**
-     * Converts a @ModifyArg handler into a BEFORE HookListener.
-     * Handler signature: (single argument to modify) -> returns the modified value.
-     */
-    private HookListener createModifyArgListener(MixinMethod mixinMethod) {
-        Method handler = mixinMethod.getHandlerMethod();
-        handler.setAccessible(true);
+    private HookListener modifyArgListener(MixinMethod mixinMethod) {
+        Method handler = accessible(mixinMethod.getHandlerMethod());
         int argIndex = mixinMethod.getArgIndex();
+        return ctx -> ctx.setArg(argIndex, invoke(handler, ctx.getInstance(), new Object[]{ctx.getArgs()[argIndex]}));
+    }
 
-        return ctx -> {
-            try {
-                bindShadows(ctx.getInstance());
-                Object original = ctx.getArgs()[argIndex];
-                Object modified = handler.invoke(mixinInstances.get(), original);
-                writeBackShadows(ctx.getInstance());
-                ctx.setArg(argIndex, modified);
-            } catch (Exception e) {
-                LOGGER.log(Level.WARNING, "@ModifyArg handler execution failed: " + handler.getName(), e);
+    // ---------------------------------------------------------------- instruction points
+
+    /**
+     * Operand layouts (the outer method's {@code this} is appended when it is an instance method):
+     * <ul>
+     *   <li>INVOKE inject: {@code [outer args..., this?]} → {@code null}, or {@code Object[]{ret}} when cancelled</li>
+     *   <li>Redirect: {@code [receiver?, call args..., this?]} → call result</li>
+     *   <li>ModifyVariable / ModifyReturnValue: {@code [value, this?]} → new value</li>
+     * </ul>
+     *
+     * @param outerStatic whether the hooked (outer) method is static
+     */
+    public PointHandler toPointHandler(MixinMethod mixinMethod, boolean outerStatic) {
+        Method handler = accessible(mixinMethod.getHandlerMethod());
+        int selfSlots = outerStatic ? 0 : 1;
+        return switch (mixinMethod.getType()) {
+            case INJECT_INVOKE -> {
+                int paramCount = handler.getParameterCount();
+                boolean returnable = CallbackInfoReturnable.class.isAssignableFrom(
+                        handler.getParameterTypes()[paramCount - 1]);
+                boolean cancellable = mixinMethod.isCancellable();
+                yield ops -> {
+                    Object self = outerStatic ? null : ops[ops.length - 1];
+                    Object[] outerArgs = Arrays.copyOf(ops, ops.length - selfSlots);
+                    Object[] handlerArgs = mapArguments(outerArgs, paramCount);
+                    CallbackInfo ci = returnable ? new CallbackInfoReturnable<>(null) : new CallbackInfo();
+                    handlerArgs[paramCount - 1] = ci;
+                    invoke(handler, self, handlerArgs);
+                    if (cancellable && ci.isCancelled()) {
+                        Object ret = ci instanceof CallbackInfoReturnable<?> cir ? cir.getReturnValue() : null;
+                        return new Object[]{ret};
+                    }
+                    return null;
+                };
             }
+            case REDIRECT -> ops -> {
+                Object self = outerStatic ? null : ops[ops.length - 1];
+                return invoke(handler, self, Arrays.copyOf(ops, ops.length - selfSlots));
+            };
+            case MODIFY_VARIABLE, MODIFY_RETURN_VALUE -> ops -> {
+                Object self = outerStatic ? null : ops[ops.length - 1];
+                return invoke(handler, self, new Object[]{ops[0]});
+            };
+            default -> throw new IllegalArgumentException(mixinMethod.getType() + " is not a point, use toListener");
         };
     }
 
-    /** Copies @Shadow fields from the target instance to the Mixin instance (read). */
-    private void bindShadows(Object targetInstance) {
-        if (targetInstance == null || shadowBindings.isEmpty()) return;
+    // ---------------------------------------------------------------- helpers
+
+    private static Object[] mapArguments(Object[] targetArgs, int handlerParamCount) {
+        Object[] handlerArgs = new Object[handlerParamCount];
+        System.arraycopy(targetArgs, 0, handlerArgs, 0, Math.min(handlerParamCount - 1, targetArgs.length));
+        return handlerArgs;
+    }
+
+    private static Method accessible(Method m) {
+        m.setAccessible(true);
+        return m;
+    }
+
+    /** Invokes a handler with @Shadow binding; rethrows the handler's own exception unwrapped. */
+    private Object invoke(Method handler, Object target, Object[] args) {
+        Object instance = Modifier.isStatic(handler.getModifiers()) ? null : mixinInstances.get();
+        Object previousTarget = currentTarget.get();
+        currentTarget.set(target);
+        bindShadows(instance, target);
+        try {
+            return handler.invoke(instance, args);
+        } catch (InvocationTargetException e) {
+            throw sneaky(e.getCause());
+        } catch (IllegalAccessException e) {
+            throw new IllegalStateException(e);
+        } finally {
+            writeBackShadows(instance, target);
+            if (previousTarget == null) currentTarget.remove();
+            else currentTarget.set(previousTarget);
+        }
+    }
+
+    private void bindShadows(Object instance, Object target) {
+        if (instance == null || target == null || shadowBindings.isEmpty()) return;
         for (var binding : shadowBindings) {
             try {
-                Object value = binding.targetField().get(targetInstance);
-                binding.mixinField().set(mixinInstances.get(), value);
+                binding.mixinField().set(instance, binding.targetField().get(target));
             } catch (Exception e) {
                 LOGGER.log(Level.FINE, "@Shadow read failed: " + binding.mixinField().getName(), e);
             }
         }
     }
 
-    /** Copies @Shadow fields from the Mixin instance back to the target instance (write-back). */
-    private void writeBackShadows(Object targetInstance) {
-        if (targetInstance == null || shadowBindings.isEmpty()) return;
+    private void writeBackShadows(Object instance, Object target) {
+        if (instance == null || target == null || shadowBindings.isEmpty()) return;
         for (var binding : shadowBindings) {
+            if (Modifier.isFinal(binding.targetField().getModifiers())) continue;
             try {
-                Object value = binding.mixinField().get(mixinInstances.get());
-                binding.targetField().set(targetInstance, value);
+                binding.targetField().set(target, binding.mixinField().get(instance));
             } catch (Exception e) {
                 LOGGER.log(Level.FINE, "@Shadow write-back failed: " + binding.mixinField().getName(), e);
             }
         }
     }
 
+    @SuppressWarnings("unchecked")
+    private static <T extends Throwable> RuntimeException sneaky(Throwable t) throws T {
+        throw (T) t;
+    }
 }

@@ -4,16 +4,13 @@ import net.bytebuddy.asm.Advice;
 import net.bytebuddy.implementation.bytecode.assign.Assigner;
 
 /**
- * ByteBuddy Advice template. Inlined into the target NMS method.
+ * ByteBuddy Advice template inlined into hooked NMS methods.
  *
- * <p>On Enter, calls {@link HookDispatcher#dispatchBefore}, and if the
- * return value is true (non-default), skips the original method (skipOn).
- * On Exit, calls {@link HookDispatcher#dispatchAfter} to execute
- * AFTER hooks or apply replacement return values.
+ * <p>When the site has no active BEFORE/REPLACE (enter) or AFTER (exit) hooks, the inlined code
+ * reads one flag and does nothing else: the argument array is only materialized inside the branch.
  *
- * <p>This class is compiled in the plugin CL, but at inline time the bytecode
- * is copied and executed in the target CL (server CL). Since {@code HookDispatcher}
- * is injected into the bootstrap CL, it is accessible from all CLs.
+ * <p>This class is never loaded for execution; ByteBuddy copies its bytecode into the target method,
+ * where {@link HookDispatcher} resolves to the copy in the bootstrap ClassLoader.
  */
 public final class NMSAdvice {
 
@@ -21,22 +18,30 @@ public final class NMSAdvice {
     }
 
     @Advice.OnMethodEnter(skipOn = Advice.OnNonDefaultValue.class)
-    public static boolean enter(
+    public static Object enter(
+            @HookId int id,
             @Advice.This(optional = true, typing = Assigner.Typing.DYNAMIC) Object self,
-            @Advice.AllArguments(readOnly = false, typing = Assigner.Typing.DYNAMIC) Object[] args,
-            @Advice.Origin("#t") String className,
-            @Advice.Origin("#m") String methodName) {
-        return HookDispatcher.dispatchBefore(self, args, className, methodName);
+            @Advice.AllArguments(readOnly = false, typing = Assigner.Typing.DYNAMIC) Object[] args) {
+        if (!HookDispatcher.enterActive(id)) {
+            return null;
+        }
+        Object[] copy = args;
+        Object result = HookDispatcher.enter(id, self, copy);
+        args = copy; // writes argument modifications (setArg / @ModifyArg) back to the parameters
+        return result;
     }
 
-    @Advice.OnMethodExit(onThrowable = Throwable.class)
+    @Advice.OnMethodExit
     public static void exit(
+            @HookId int id,
             @Advice.This(optional = true, typing = Assigner.Typing.DYNAMIC) Object self,
             @Advice.AllArguments(typing = Assigner.Typing.DYNAMIC) Object[] args,
-            @Advice.Origin("#t") String className,
-            @Advice.Origin("#m") String methodName,
-            @Advice.Enter boolean skipped,
+            @Advice.Enter Object skipped,
             @Advice.Return(readOnly = false, typing = Assigner.Typing.DYNAMIC) Object returnValue) {
-        returnValue = HookDispatcher.dispatchAfter(self, args, className, methodName, returnValue, skipped);
+        if (skipped != null) {
+            returnValue = HookDispatcher.resolveSkipped(skipped, returnValue);
+        } else if (HookDispatcher.exitActive(id)) {
+            returnValue = HookDispatcher.exit(id, self, args, returnValue);
+        }
     }
 }
