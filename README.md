@@ -187,7 +187,7 @@ repositories {
 }
 
 dependencies {
-    compileOnly("dev.velvet.nmshook:nmshook-api:0.1.0-SNAPSHOT")
+    compileOnly("dev.seraphicness.nmshook:nmshook-api:0.1.0-SNAPSHOT")
 }
 ```
 

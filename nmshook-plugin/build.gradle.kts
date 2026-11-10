@@ -20,8 +20,8 @@ tasks {
     jar {
         manifest {
             attributes(
-                "Premain-Class" to "dev.velvet.nmshook.agent.NMSAgent",
-                "Agent-Class" to "dev.velvet.nmshook.agent.NMSAgent",
+                "Premain-Class" to "dev.seraphicness.nmshook.agent.NMSAgent",
+                "Agent-Class" to "dev.seraphicness.nmshook.agent.NMSAgent",
                 "Can-Retransform-Classes" to "true",
                 "Can-Redefine-Classes" to "true",
             )
@@ -32,7 +32,7 @@ tasks {
         mergeServiceFiles()
         // ByteBuddy relocate disabled — shadow plugin's ASM 9.7 can't process Java 25 class files
         // Enable when shadow plugin updates ASM to support class file version 69+
-        // relocate("net.bytebuddy", "dev.velvet.nmshook.shaded.bytebuddy")
+        // relocate("net.bytebuddy", "dev.seraphicness.nmshook.shaded.bytebuddy")
     }
 
     reobfJar {

@@ -7,7 +7,7 @@ plugins {
 subprojects {
     apply(plugin = "java")
 
-    group = "dev.velvet.nmshook"
+    group = "dev.seraphicness.nmshook"
     version = "0.1.0-SNAPSHOT"
 
     java {
