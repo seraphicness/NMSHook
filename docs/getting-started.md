@@ -56,9 +56,26 @@ java {
 ### Referencing NMS classes
 
 To write `ServerPlayer.class` in your code you need the server internals on your compile classpath.
-Use [paperweight-userdev](https://docs.papermc.io/paper/dev/userdev/) with the dev bundle of the Paper
-version you target, **without a `reobfJar` step** — since 26.1 the server runs with Mojang names and
-Paper no longer remaps plugins. Follow the Paper docs for the exact plugin and dev bundle versions.
+Use [paperweight-userdev](https://docs.papermc.io/paper/dev/userdev/) with the dev bundle of the lowest
+Paper version you support, **without a `reobfJar` step** — since 26.1 the server runs with Mojang names and
+Paper no longer remaps plugins:
+
+```kotlin
+plugins {
+    java
+    id("io.papermc.paperweight.userdev") version "2.0.0-beta.24"
+}
+
+dependencies {
+    paperweight.paperDevBundle("26.1.2.build.+")
+    compileOnly("com.github.seraphicness.NMSHook:nmshook-api:TAG")
+}
+```
+
+Keep the `.build.` part in the version: a bare `26.1.+` can resolve to a different, possibly breaking
+release. Only the latest paperweight-userdev release is supported by PaperMC; check the
+[Plugin Portal](https://plugins.gradle.org/plugin/io.papermc.paperweight.userdev) for newer versions.
+Since the dev bundle already contains the Paper API, you do not need a separate `paper-api` dependency.
 
 If you only hook a few methods you can also avoid compile-time NMS access and look classes up at runtime:
 
