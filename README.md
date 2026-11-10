@@ -71,9 +71,16 @@ dependencies {
 ```
 
 Use `compileOnly` — **never shade the API**; the classes come from the NMSHook plugin at runtime.
-To reference NMS classes such as `ServerPlayer` at compile time, use
+To reference NMS classes such as `ServerPlayer` at compile time, add
 [paperweight-userdev](https://docs.papermc.io/paper/dev/userdev/) **without `reobfJar`** (Paper 26.x runs
-with Mojang names and no longer remaps plugins). Maven setup: [Getting started](docs/getting-started.md).
+with Mojang names and no longer remaps plugins):
+
+```kotlin
+plugins { id("io.papermc.paperweight.userdev") version "2.0.0-beta.24" }
+dependencies { paperweight.paperDevBundle("26.1.2.build.+") }
+```
+
+Maven setup and details: [Getting started](docs/getting-started.md).
 
 ### 2. paper-plugin.yml
 
