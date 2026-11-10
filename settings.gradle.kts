@@ -7,6 +7,11 @@ pluginManagement {
     }
 }
 
+plugins {
+    // Auto-downloads the JDK 25 toolchain if it is not installed locally
+    id("org.gradle.toolchains.foojay-resolver-convention") version "1.0.0"
+}
+
 include(
     "nmshook-api",
     "nmshook-hook",
@@ -14,5 +19,6 @@ include(
     "nmshook-transform",
     "nmshook-agent",
     "nmshook-resolver",
+    "nmshook-core",
     "nmshook-plugin",
 )

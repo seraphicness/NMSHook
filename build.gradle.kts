@@ -1,17 +1,16 @@
 plugins {
     java
-    id("io.papermc.paperweight.userdev") version "2.0.0-beta.14" apply false
-    id("com.gradleup.shadow") version "8.3.6" apply false
+    id("com.gradleup.shadow") version "9.6.1" apply false
 }
 
 subprojects {
     apply(plugin = "java")
 
-    group = "dev.velvet.nmshook"
+    group = "dev.seraphicness.nmshook"
     version = "0.1.0-SNAPSHOT"
 
     java {
-        toolchain.languageVersion.set(JavaLanguageVersion.of(21))
+        toolchain.languageVersion.set(JavaLanguageVersion.of(25))
     }
 
     repositories {

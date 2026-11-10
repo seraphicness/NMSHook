@@ -1,11 +1,16 @@
 // Plugin entry point — Paper plugin bootstrap + Composition Root
+//
+// Targets Paper 26.1 – 26.3. Since 26.1 the server is unobfuscated and Paper no longer
+// remaps plugins, so there is no reobf step: the jar is shipped Mojang-named as-is.
+// This module does not reference NMS classes directly, so paper-api is enough
+// (no paperweight dev bundle). Compiling against the lowest supported line (26.1)
+// keeps the jar binary-compatible with 26.2 and 26.3.
 plugins {
-    id("io.papermc.paperweight.userdev")
     id("com.gradleup.shadow")
 }
 
 dependencies {
-    paperweight.paperDevBundle("1.21.4-R0.1-SNAPSHOT")
+    compileOnly("io.papermc.paper:paper-api:26.1.2.build.+")
 
     implementation(project(":nmshook-api"))
     implementation(project(":nmshook-hook"))
@@ -13,33 +18,31 @@ dependencies {
     implementation(project(":nmshook-transform"))
     implementation(project(":nmshook-agent"))
     implementation(project(":nmshook-resolver"))
-    implementation("net.bytebuddy:byte-buddy:1.14.18")
+    implementation(project(":nmshook-core"))
+    implementation("net.bytebuddy:byte-buddy:1.18.16")
 }
+
+val agentManifest = mapOf(
+    "Premain-Class" to "dev.seraphicness.nmshook.agent.NMSAgent",
+    "Agent-Class" to "dev.seraphicness.nmshook.agent.NMSAgent",
+    "Can-Retransform-Classes" to "true",
+    "Can-Redefine-Classes" to "true",
+)
 
 tasks {
     jar {
-        manifest {
-            attributes(
-                "Premain-Class" to "dev.velvet.nmshook.agent.NMSAgent",
-                "Agent-Class" to "dev.velvet.nmshook.agent.NMSAgent",
-                "Can-Retransform-Classes" to "true",
-                "Can-Redefine-Classes" to "true",
-            )
-        }
+        manifest { attributes(agentManifest) }
     }
 
     shadowJar {
+        archiveBaseName.set("NMSHook")
+        archiveClassifier.set("")
         mergeServiceFiles()
-        // ByteBuddy relocate disabled — shadow plugin's ASM 9.7 can't process Java 25 class files
-        // Enable when shadow plugin updates ASM to support class file version 69+
-        // relocate("net.bytebuddy", "dev.velvet.nmshook.shaded.bytebuddy")
-    }
-
-    reobfJar {
-        outputJar.set(layout.buildDirectory.file("libs/NMSHook-${project.version}.jar"))
+        manifest { attributes(agentManifest) }
+        // relocate("net.bytebuddy", "dev.seraphicness.nmshook.shaded.bytebuddy")
     }
 
     assemble {
-        dependsOn(reobfJar)
+        dependsOn(shadowJar)
     }
 }
