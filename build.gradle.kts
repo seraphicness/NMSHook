@@ -7,7 +7,8 @@ subprojects {
     apply(plugin = "java")
 
     group = "dev.seraphicness.nmshook"
-    version = "0.1.0-SNAPSHOT"
+    // Release builds pass -PreleaseVersion=x.y.z (see .github/workflows/release.yml)
+    version = rootProject.findProperty("releaseVersion")?.toString() ?: "0.1.0-SNAPSHOT"
 
     java {
         toolchain.languageVersion.set(JavaLanguageVersion.of(25))

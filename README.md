@@ -282,14 +282,18 @@ restores the original class.
 
 Requires JDK 25 (downloaded automatically by the Gradle toolchain resolver if missing).
 
-### Releasing the API
+### Releasing
 
-Push a tag; JitPack builds `nmshook-api` from it on first request (see `jitpack.yml`):
+Everything runs on GitHub — no local checkout needed:
 
-```bash
-git tag v0.1.0 && git push origin v0.1.0
-# -> com.github.seraphicness.NMSHook:nmshook-api:v0.1.0
-```
+1. **Actions → Release → Run workflow**, enter a version such as `0.1.0`.
+2. The workflow builds and tests with JDK 25, creates the tag `v0.1.0`, and publishes a GitHub release with
+   `NMSHook-0.1.0.jar` (server plugin) and `nmshook-api-0.1.0.jar`.
+3. The tag makes the API available on JitPack: `com.github.seraphicness.NMSHook:nmshook-api:v0.1.0`
+   (the first request triggers the JitPack build, see `jitpack.yml`).
+
+Every push to `master` and every pull request is built by **Actions → Build**; the plugin jar is attached
+to the run as an artifact.
 
 The API can also be published to GitHub Packages with
 `./gradlew :nmshook-api:publishAllPublicationsToGitHubPackagesRepository` (needs `GITHUB_ACTOR` /

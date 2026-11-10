@@ -4,9 +4,12 @@ import dev.seraphicness.nmshook.api.NMSHookDebug;
 import dev.seraphicness.nmshook.api.target.HookTargetException;
 import dev.seraphicness.nmshook.api.target.MethodSelector;
 import net.bytebuddy.ByteBuddy;
-import net.bytebuddy.agent.builder.AgentBuilder;
 import net.bytebuddy.asm.Advice;
 import net.bytebuddy.asm.AsmVisitorWrapper;
+import net.bytebuddy.dynamic.scaffold.InstrumentedType;
+import net.bytebuddy.dynamic.scaffold.MethodGraph;
+import net.bytebuddy.dynamic.scaffold.TypeValidation;
+import net.bytebuddy.implementation.Implementation;
 import net.bytebuddy.description.method.MethodDescription;
 import net.bytebuddy.description.type.TypeDescription;
 import net.bytebuddy.dynamic.ClassFileLocator;
@@ -19,7 +22,6 @@ import net.bytebuddy.jar.asm.MethodVisitor;
 import net.bytebuddy.matcher.ElementMatcher;
 import net.bytebuddy.matcher.ElementMatchers;
 import net.bytebuddy.pool.TypePool;
-import net.bytebuddy.utility.JavaModule;
 import net.bytebuddy.utility.OpenedClassReader;
 
 import java.io.File;
@@ -57,12 +59,11 @@ public final class ClassRewriter {
 
     private final Instrumentation instrumentation;
     private final Map<Class<?>, ClassPlan> plans = new ConcurrentHashMap<>();
-    private final ThreadLocal<ClassPlan> currentPlan = new ThreadLocal<>();
     private final ThreadLocal<Throwable> lastError = new ThreadLocal<>();
     private final ClassFileLocator adviceLocator;
     private final TypeDescription nmsAdvice;
     private final TypeDescription cancelCatchAdvice;
-    private final ClassFileTransformer delegate;
+    private final ByteBuddy byteBuddy;
     private final ClassFileTransformer transformer;
     private final DispatcherBridge bridge;
     private volatile boolean closed;
@@ -80,30 +81,15 @@ public final class ClassRewriter {
         this.cancelCatchAdvice = pool.describe(CancelCatchAdvice.class.getName()).resolve();
         this.bridge = injectDispatcher();
 
-        this.delegate = new AgentBuilder.Default(new ByteBuddy())
-                .disableClassFormatChanges()
-                .with(AgentBuilder.RedefinitionStrategy.RETRANSFORMATION)
-                .with(AgentBuilder.InitializationStrategy.NoOp.INSTANCE)
-                .ignore(ElementMatchers.none())
-                .with(new AgentBuilder.Listener.Adapter() {
-                    @Override
-                    public void onError(String typeName, ClassLoader classLoader, JavaModule module,
-                                        boolean loaded, Throwable throwable) {
-                        lastError.set(throwable);
-                    }
-
-                    @Override
-                    public void onTransformation(TypeDescription typeDescription, ClassLoader classLoader,
-                                                 JavaModule module, boolean loaded, DynamicType dynamicType) {
-                        dumpIfDebug(typeDescription, dynamicType);
-                    }
-                })
-                .type(ElementMatchers.any())
-                .transform((builder, typeDescription, classLoader, module, protectionDomain) -> {
-                    ClassPlan plan = currentPlan.get();
-                    return plan == null ? builder : apply(builder, plan);
-                })
-                .makeRaw();
+        // Retransformation-safe ByteBuddy: no new members, no type initializers, no validation of the
+        // (unchanged) class shape. Equivalent to AgentBuilder.disableClassFormatChanges(), without
+        // AgentBuilder, whose constructor initializes injection strategies that touch sun.misc.Unsafe
+        // (printed as a "terminally deprecated method" warning on Java 24+).
+        this.byteBuddy = new ByteBuddy()
+                .with(TypeValidation.DISABLED)
+                .with(Implementation.Context.Disabled.Factory.INSTANCE)
+                .with(MethodGraph.Compiler.ForDeclaredMethods.INSTANCE)
+                .with(InstrumentedType.Factory.Default.FROZEN);
 
         this.transformer = new ClassFileTransformer() {
             @Override
@@ -113,15 +99,11 @@ public final class ClassRewriter {
                 if (classBeingRedefined == null) return null;
                 ClassPlan plan = plans.get(classBeingRedefined);
                 if (plan == null) return null;
-                currentPlan.set(plan);
                 try {
-                    return delegate.transform(module, loader, className, classBeingRedefined,
-                            protectionDomain, classfileBuffer);
+                    return rewrite(className, loader, classfileBuffer, plan);
                 } catch (Throwable t) {
                     lastError.set(t);
                     return null;
-                } finally {
-                    currentPlan.remove();
                 }
             }
         };
@@ -207,6 +189,18 @@ public final class ClassRewriter {
     }
 
     // ------------------------------------------------------------------ plan -> ByteBuddy
+
+    private byte[] rewrite(String internalName, ClassLoader loader, byte[] original, ClassPlan plan) {
+        String name = internalName.replace('/', '.');
+        ClassFileLocator locator = new ClassFileLocator.Compound(
+                ClassFileLocator.Simple.of(name, original),
+                loader == null ? ClassFileLocator.ForClassLoader.ofBootLoader() : ClassFileLocator.ForClassLoader.of(loader));
+        TypePool pool = TypePool.Default.of(locator);
+        TypeDescription type = pool.describe(name).resolve();
+        DynamicType.Unloaded<?> result = apply(byteBuddy.redefine(type, locator), plan).make(pool);
+        dumpIfDebug(type, result);
+        return result.getBytes();
+    }
 
     private DynamicType.Builder<?> apply(DynamicType.Builder<?> builder, ClassPlan plan) {
         // Wrappers registered later see the class file first. Advice is registered first so that it
@@ -302,12 +296,11 @@ public final class ClassRewriter {
                 for (String name : List.of(DISPATCHER_NAME, DISPATCHER_NAME + "$Cancel")) {
                     classes.put(name, adviceLocator.locate(name).resolve());
                 }
-                // Preferred: define the classes directly in the bootstrap loader (jdk.internal.misc.Unsafe,
-                // opened through Instrumentation). Unlike appending a jar to the bootstrap class path this
-                // does not disable CDS for the rest of the JVM, so no "Sharing is only supported..." warning.
-                ClassInjector.UsingUnsafe.Factory unsafe = ClassInjector.UsingUnsafe.Factory.resolve(instrumentation);
-                if (unsafe.isAvailable()) {
-                    unsafe.make(null, null).injectRaw(classes);
+                // Preferred: define the classes directly in the bootstrap loader with jdk.internal.misc.Unsafe,
+                // exported to NMSHook through Instrumentation. Unlike appending a jar to the bootstrap class
+                // path this keeps CDS enabled (no "Sharing is only supported..." warning), and unlike
+                // sun.misc.Unsafe it prints no "terminally deprecated method" warning on Java 24+.
+                if (defineInBootstrap(classes)) {
                     LOGGER.info("HookDispatcher defined in bootstrap CL");
                 } else {
                     File folder = Files.createTempDirectory("nmshook").toFile();
@@ -334,6 +327,30 @@ public final class ClassRewriter {
             return new DispatcherBridge(existing);
         } catch (ReflectiveOperationException e) {
             throw new IllegalStateException("Incompatible HookDispatcher in bootstrap CL. Restart the server.", e);
+        }
+    }
+
+    /** @return false if the internal API is not available (the caller falls back to a class path append) */
+    private boolean defineInBootstrap(Map<String, byte[]> classes) {
+        try {
+            Module base = Object.class.getModule();
+            Module self = ClassRewriter.class.getModule();
+            instrumentation.redefineModule(base, java.util.Set.of(),
+                    Map.of("jdk.internal.misc", java.util.Set.of(self)), Map.of(),
+                    java.util.Set.of(), Map.of());
+            Class<?> unsafeClass = Class.forName("jdk.internal.misc.Unsafe");
+            Object unsafe = unsafeClass.getMethod("getUnsafe").invoke(null);
+            java.lang.reflect.Method define = unsafeClass.getMethod("defineClass", String.class, byte[].class,
+                    int.class, int.class, ClassLoader.class, ProtectionDomain.class);
+            // outer class first, nested classes after
+            for (String name : classes.keySet().stream().sorted().toList()) {
+                byte[] bytes = classes.get(name);
+                define.invoke(unsafe, name, bytes, 0, bytes.length, null, null);
+            }
+            return true;
+        } catch (ReflectiveOperationException | RuntimeException | LinkageError e) {
+            LOGGER.log(Level.FINE, "Direct bootstrap definition unavailable", e);
+            return false;
         }
     }
 

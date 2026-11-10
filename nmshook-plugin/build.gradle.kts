@@ -30,6 +30,12 @@ val agentManifest = mapOf(
 )
 
 tasks {
+    processResources {
+        val pluginVersion = project.version.toString()
+        inputs.property("version", pluginVersion)
+        filesMatching("paper-plugin.yml") { expand("version" to pluginVersion) }
+    }
+
     jar {
         manifest { attributes(agentManifest) }
     }
