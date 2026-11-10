@@ -18,9 +18,9 @@ Built on [ByteBuddy](https://bytebuddy.net/) + [paperweight-userdev](https://git
 
 ## Requirements
 
-- Java 21+
-- Paper 1.21+
-- ByteBuddy 1.14+ (bundled)
+- Java 25+
+- Paper 26.1 – 26.3
+- ByteBuddy 1.18+ (bundled)
 
 ## Quick Start
 
@@ -175,6 +175,8 @@ the same Instrumentation). In that case you can hide the warning with:
 ./gradlew build
 ```
 
+Requires JDK 25 (downloaded automatically via the Gradle toolchain resolver if missing).
+
 Output: `nmshook-plugin/build/libs/NMSHook-<version>.jar`
 
 ## Dependency (for plugin developers)
@@ -190,6 +192,10 @@ dependencies {
     compileOnly("dev.seraphicness.nmshook:nmshook-api:0.1.0-SNAPSHOT")
 }
 ```
+
+Since Minecraft 26.1 the server is unobfuscated and Paper no longer remaps plugins.
+If your plugin references NMS classes, build it with Mojang names (paperweight-userdev
+without a `reobfJar` step). Spigot-mapped (reobfuscated) jars will not work on 26.x.
 
 And declare the dependency in `paper-plugin.yml`:
 

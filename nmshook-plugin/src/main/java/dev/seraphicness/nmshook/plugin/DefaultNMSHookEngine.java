@@ -228,7 +228,7 @@ final class DefaultNMSHookEngine implements NMSHookEngine {
         try {
             if (java.lang.reflect.Modifier.isAbstract(hookClass.getModifiers())) {
                 return new net.bytebuddy.ByteBuddy(
-                                net.bytebuddy.ClassFileVersion.ofJavaVersion(21))
+                                net.bytebuddy.ClassFileVersion.ofJavaVersion(25))
                         .subclass(hookClass)
                         .make()
                         .load(hookClass.getClassLoader())

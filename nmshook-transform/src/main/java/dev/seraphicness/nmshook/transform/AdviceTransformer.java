@@ -103,7 +103,7 @@ public final class AdviceTransformer {
                 NMSAdvice.class.getClassLoader());
 
         var transformer = new AgentBuilder.Default(new net.bytebuddy.ByteBuddy()
-                        .with(net.bytebuddy.ClassFileVersion.ofJavaVersion(21)))
+                        .with(net.bytebuddy.ClassFileVersion.ofJavaVersion(25)))
                 .with(AgentBuilder.InitializationStrategy.NoOp.INSTANCE)
                 .disableClassFormatChanges()
                 .with(AgentBuilder.RedefinitionStrategy.RETRANSFORMATION)

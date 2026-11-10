@@ -2,5 +2,5 @@ name: NMSHook
 version: '0.1.0-SNAPSHOT'
 main: dev.seraphicness.nmshook.plugin.NMSHookPlugin
 description: Mixin-style runtime hook library based on ByteBuddy + Paper NMS
-api-version: '1.21'
-author: velvet
+api-version: '26.1'
+author: seraphicness

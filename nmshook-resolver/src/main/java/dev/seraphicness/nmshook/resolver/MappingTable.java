@@ -5,7 +5,7 @@ import java.util.Map;
 /**
  * Value Object holding Mojang-to-runtime mapping data for a specific version.
  *
- * @param version        Minecraft version (e.g. "1.21.4")
+ * @param version        Minecraft version (e.g. "26.1.2")
  * @param classMappings  Mojang class name -> runtime class name
  * @param methodMappings Mojang "class#method" -> runtime method name
  */

@@ -24,8 +24,11 @@ public final class NMSClassResolver {
     /** Loads the mapping table. Called once at server startup. */
     public void loadMappings() {
         String version = versionDetector.detect();
-        // Paper 1.20.5+ uses Mojang mappings at runtime, so no remapping is needed.
-        // For older versions or Spigot servers, version-specific mapping files would be loaded here.
+        // Minecraft 26.1+ ships unobfuscated and Paper runs with Mojang names, so no remapping is needed.
+        if (!versionDetector.isSupported(version)) {
+            LOGGER.warning("Minecraft " + version + " is outside the supported range "
+                    + VersionDetector.SUPPORTED_RANGE + ". Hooks may fail.");
+        }
         this.mappingTable = new MappingTable(version, Map.of(), Map.of());
         LOGGER.info("Mapping table loaded: " + version);
     }
