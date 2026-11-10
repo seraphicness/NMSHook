@@ -49,6 +49,13 @@ public final class AdviceTransformer {
         if (bootstrapInjected) return;
         synchronized (this) {
             if (bootstrapInjected) return;
+            // Already injected earlier in this JVM (e.g. plugin reload)? Appending to the bootstrap
+            // classpath again would only print another CDS warning and leave another temp jar.
+            if (isPresentInBootstrap()) {
+                bootstrapInjected = true;
+                LOGGER.fine("HookDispatcher already present in bootstrap CL, skipping injection");
+                return;
+            }
             try {
                 File tempFolder = new File(System.getProperty("java.io.tmpdir"), "nmshook");
                 tempFolder.mkdirs();
@@ -67,6 +74,15 @@ public final class AdviceTransformer {
             } catch (Exception e) {
                 throw new RuntimeException("Failed to inject HookDispatcher into bootstrap CL", e);
             }
+        }
+    }
+
+    private static boolean isPresentInBootstrap() {
+        try {
+            Class.forName(HookDispatcher.class.getName(), false, null);
+            return true;
+        } catch (ClassNotFoundException e) {
+            return false;
         }
     }
 

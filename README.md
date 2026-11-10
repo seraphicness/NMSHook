@@ -149,19 +149,24 @@ Add to your server JVM args:
 Transformed bytecode will be dumped to `plugins/NMSHook/debug/`.  
 Hooks exceeding 1ms execution time will be logged as warnings.
 
-### JVM Flags (recommended)
+### javaagent Mode (recommended — no JVM warnings)
+
+Start the server with NMSHook as a javaagent:
 
 ```
--XX:+EnableDynamicAgentLoading   # suppress agent loading warning
--Xshare:off                      # suppress CDS warning
+java -javaagent:plugins/NMSHook-0.1.0-SNAPSHOT.jar -jar paper.jar
 ```
 
-### javaagent Mode (optional)
+The plugin then uses the Instrumentation from `premain` and never self-attaches,
+so the JVM's *"A Java agent has been loaded dynamically"* warning is never printed.
+The jar stays in `plugins/` and is loaded as a normal plugin as well.
 
-For earlier Instrumentation acquisition, add to JVM args:
+Without `-javaagent`, NMSHook falls back to dynamic attach (once per JVM — reloads reuse
+the same Instrumentation). In that case you can hide the warning with:
 
 ```
--javaagent:plugins/NMSHook-0.1.0-SNAPSHOT.jar
+-XX:+EnableDynamicAgentLoading   # hide dynamic agent loading warning
+-Xshare:off                      # hide the one-time CDS warning (bootstrap classpath append)
 ```
 
 ## Building
