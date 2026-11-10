@@ -13,5 +13,5 @@ dependencies {
 
 tasks.test {
     // Tests self-attach an agent to retransform their own target classes.
-    jvmArgs("-XX:+EnableDynamicAgentLoading", "-Djdk.attach.allowAttachSelf=true", "-Xshare:off")
+    jvmArgs("-XX:+EnableDynamicAgentLoading", "-Djdk.attach.allowAttachSelf=true")
 }

@@ -302,12 +302,11 @@ public final class ClassRewriter {
                 for (String name : List.of(DISPATCHER_NAME, DISPATCHER_NAME + "$Cancel")) {
                     classes.put(name, adviceLocator.locate(name).resolve());
                 }
-                // Preferred: define the classes directly in the bootstrap loader (jdk.internal.misc.Unsafe,
-                // opened through Instrumentation). Unlike appending a jar to the bootstrap class path this
-                // does not disable CDS for the rest of the JVM, so no "Sharing is only supported..." warning.
-                ClassInjector.UsingUnsafe.Factory unsafe = ClassInjector.UsingUnsafe.Factory.resolve(instrumentation);
-                if (unsafe.isAvailable()) {
-                    unsafe.make(null, null).injectRaw(classes);
+                // Preferred: define the classes directly in the bootstrap loader with jdk.internal.misc.Unsafe,
+                // exported to NMSHook through Instrumentation. Unlike appending a jar to the bootstrap class
+                // path this keeps CDS enabled (no "Sharing is only supported..." warning), and unlike
+                // sun.misc.Unsafe it prints no "terminally deprecated method" warning on Java 24+.
+                if (defineInBootstrap(classes)) {
                     LOGGER.info("HookDispatcher defined in bootstrap CL");
                 } else {
                     File folder = Files.createTempDirectory("nmshook").toFile();
@@ -334,6 +333,30 @@ public final class ClassRewriter {
             return new DispatcherBridge(existing);
         } catch (ReflectiveOperationException e) {
             throw new IllegalStateException("Incompatible HookDispatcher in bootstrap CL. Restart the server.", e);
+        }
+    }
+
+    /** @return false if the internal API is not available (the caller falls back to a class path append) */
+    private boolean defineInBootstrap(Map<String, byte[]> classes) {
+        try {
+            Module base = Object.class.getModule();
+            Module self = ClassRewriter.class.getModule();
+            instrumentation.redefineModule(base, java.util.Set.of(),
+                    Map.of("jdk.internal.misc", java.util.Set.of(self)), Map.of(),
+                    java.util.Set.of(), Map.of());
+            Class<?> unsafeClass = Class.forName("jdk.internal.misc.Unsafe");
+            Object unsafe = unsafeClass.getMethod("getUnsafe").invoke(null);
+            java.lang.reflect.Method define = unsafeClass.getMethod("defineClass", String.class, byte[].class,
+                    int.class, int.class, ClassLoader.class, ProtectionDomain.class);
+            // outer class first, nested classes after
+            for (String name : classes.keySet().stream().sorted().toList()) {
+                byte[] bytes = classes.get(name);
+                define.invoke(unsafe, name, bytes, 0, bytes.length, null, null);
+            }
+            return true;
+        } catch (ReflectiveOperationException | RuntimeException | LinkageError e) {
+            LOGGER.log(Level.FINE, "Direct bootstrap definition unavailable", e);
+            return false;
         }
     }
 
